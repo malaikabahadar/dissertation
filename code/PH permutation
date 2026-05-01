@@ -1,0 +1,225 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import signal as scipy_signal
+from concurrent.futures import ProcessPoolExecutor
+import ripser
+import threading, time, warnings
+warnings.filterwarnings('ignore')
+
+THROWS_PATH = r'C:\Users\malai\Downloads\throws.txt'
+N_PERMS     = 1000
+SUBSAMPLE   = 2001
+BIN_SIZE    = 5000
+
+A_RPS = np.array([[ 0,-1, 1],[ 1, 0,-1],[-1, 1, 0]])
+A_ML  = np.array([[ 0,-1, 1],[ 1, 0,-0.5],[-0.5, 1, 0]])
+A_HD  = np.array([[-0.5, 1.0],[0.0, 0.5]])
+A_CO  = np.array([[ 1, 0, 0],[ 0, 1, 0],[ 0, 0, 1]])
+A_PD  = np.array([[ 3, 0],[ 5, 1]])
+
+#starting population based on data from the WRPSA (World Rock Paper Scissors Association) and Wang et al. (2014)
+sp = np.array([0.354, 0.296, 0.350])
+
+# NOTE that group A = RPS noise levels, group B = non-cyclic and group C = real data (Roshambull dataset)
+all_runs = [
+    {'Name': 'RPS \u03c3=0.000', 'group': 'A', 'col': '#B8D4E8', 'noise': 0.000},
+    {'Name': 'RPS \u03c3=0.005', 'group': 'A', 'col': '#B8D4E8', 'noise': 0.005},
+    {'Name': 'RPS \u03c3=0.020', 'group': 'A', 'col': '#B8D4E8', 'noise': 0.020},
+    {'Name': 'May-Leonard',      'group': 'B', 'col': '#A8E6CF',
+     'A': A_ML, 'init': sp.copy(), 'dt': 0.005, 'steps': 3000},
+    {'Name': 'Hawk-Dove',        'group': 'B', 'col': '#F4A7B9',
+     'A': A_HD, 'init': np.array([0.7, 0.3]), 'dt': 0.05, 'steps': 2000},
+    {'Name': 'Coordination',     'group': 'B', 'col': '#FFD3B6',
+     'A': A_CO, 'init': sp.copy(), 'dt': 0.01, 'steps': 2000},
+    {"Name": "Prisoner's Dilemma",     'group': 'B', 'col': '#D4B8E0',
+     'A': A_PD, 'init': np.array([0.7, 0.3]), 'dt': 0.01, 'steps': 2000},
+    {'Name': 'Roshambull',         'group': 'C', 'col': '#B8D4E8'},
+]
+
+np.random.seed(42)
+t_start = time.time()
+
+def subsample(traj):
+    if len(traj) > SUBSAMPLE:
+        idx = np.linspace(0, len(traj)-1, SUBSAMPLE, dtype=int)
+        return traj[idx]
+    return traj
+
+def sim_rps(noise=0.0, steps=2000):
+    x = sp.copy(); h = [x.copy()]
+    for _ in range(steps):
+        f  = A_RPS @ x; dx = x * (f - x @ f)
+        x2 = x + 0.01 * dx
+        if noise > 0:
+            x2 += np.random.normal(0, noise, 3)
+        x = np.clip(x2, 0.001, 1.0) / np.clip(x2, 0.001, 1.0).sum()
+        h.append(x.copy())
+    return np.array(h)
+
+def sim_game(A, init, steps=2000, dt=0.01):
+    x = init.copy() / init.sum(); h = [x.copy()]
+    for _ in range(steps):
+        f = A @ x
+        x = np.clip(x + dt * x * (f - x @ f), 0.001, 1.0)
+        x = x / x.sum(); h.append(x.copy())
+    return np.array(h)
+
+def load_roshambull():
+    print('  loading throws.txt...', end='', flush=True)
+    bins = {}
+    with open(THROWS_PATH, 'r') as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            try:
+                matchno   = int(parts[1])
+                throwtype = parts[3].strip().lower()
+            except (ValueError, IndexError):
+                continue
+            if throwtype not in ('r','p','s'):
+                continue
+            b = (matchno // BIN_SIZE) * BIN_SIZE
+            if b not in bins:
+                bins[b] = [0, 0, 0]
+            if   throwtype == 'r': bins[b][0] += 1
+            elif throwtype == 'p': bins[b][1] += 1
+            else:                  bins[b][2] += 1
+    raw  = np.array([bins[k] for k in sorted(bins)], dtype=float)
+    tots = raw.sum(axis=1, keepdims=True); tots[tots == 0] = np.nan
+    traj = raw / tots
+    traj = traj[~np.isnan(traj).any(axis=1)]
+    print(f' done ({len(traj)} bins)')
+    return traj
+
+def compute_snr(traj):
+    res = ripser.ripser(traj, maxdim=1)
+    h1  = res['dgms'][1]; fin = h1[h1[:,1] != np.inf]
+    if len(fin):
+        ps = fin[:,1] - fin[:,0]
+        return float(max(ps)/np.mean(ps)), len(fin)
+    return 0.0, 0
+
+def _one_perm(args):
+    traj, seed = args
+    rng = np.random.default_rng(seed)
+    p   = traj.copy()
+    for col in range(p.shape[1]):
+        p[:, col] = rng.permutation(p[:, col])
+    snr, _ = compute_snr(p)
+    return snr
+
+def permutation_test(traj, n_perms=N_PERMS):
+    args = [(traj, i) for i in range(n_perms)]
+    with ProcessPoolExecutor() as ex:
+        null = list(ex.map(_one_perm, args))
+    return np.array(null)
+
+def fourier_snr(traj):
+    # R+P+S=1 therefore any column carries the same cyclic info and we can look at either rock (0), paper (1) or scissors (2)
+    _, Pxx = scipy_signal.periodogram(traj[:,0])
+    Pxx = Pxx[1:]
+    return float(max(Pxx)/np.mean(Pxx)) if len(Pxx) and max(Pxx) > 0 else 0.0
+
+def autocorr_peak(traj):
+    s  = traj[:,0] - traj[:,0].mean()
+    ac = np.correlate(s, s, mode='full')[len(s)-1:]
+    ac = ac / (ac[0] + 1e-10)
+    return float(max(abs(ac[10:min(300, len(ac))])))
+
+
+if __name__ == '__main__':
+
+    print('simulations + TDA')
+    print(f'  {SUBSAMPLE} pts per trajectory, {N_PERMS} permutations')
+    t0 = time.time(); entries = []
+
+    for run in all_runs:
+        print(f"  {run['Name']}...", end='', flush=True)
+        if run['group'] == 'C':
+            traj = load_roshambull()
+            traj = subsample(traj)
+        elif run['group'] == 'A':
+            traj = sim_rps(noise=run['noise'])
+            traj = subsample(traj)
+            print(' simulated...', end='', flush=True)
+        else:
+            traj = sim_game(run['A'], run['init'], steps=run['steps'], dt=run['dt'])
+            traj = subsample(traj)
+            print(' simulated...', end='', flush=True)
+        snr, n_h1 = compute_snr(traj)
+        fou       = fourier_snr(traj)
+        ac        = autocorr_peak(traj)
+        print(f' TDA SNR={snr:.1f}  perms...', end='', flush=True)
+        null     = permutation_test(traj)
+        thresh95 = float(np.percentile(null, 95))
+        pval     = float(np.mean(null >= snr))
+        pval_str = f'{pval:.3f}' if pval > 0 else f'<{1/N_PERMS:.3f}'
+        print(' done')
+        entries.append({**run, 'traj': traj, 'snr': snr, 'n_h1': n_h1,
+                        'fou': fou, 'ac': ac,
+                        'null': null, 'thresh95': thresh95, 'pval_str': pval_str})
+
+    t_sim = time.time() - t0
+    print(f'\nDone - took {t_sim:.2f}s')
+
+    print(f'\n  {"Name":<18} {"SNR":>8} {"H1 bars":>8} {"Fourier":>9}'
+          f' {"AC":>8} {"thresh95":>10} {"p-value":>10}')
+    print(f'  {"-"*75}')
+    for e in entries:
+        print(f"  {e['Name']:<18} {e['snr']:>8.1f} {e['n_h1']:>8d}"
+              f" {e['fou']:>9.1f} {e['ac']:>8.4f}"
+              f" {e['thresh95']:>10.2f} {e['pval_str']:>10}")
+
+    print('\nplots')
+    t0 = time.time()
+
+    n_entries = len(entries)
+    ncols = 4
+    nrows = (n_entries + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(18, 5*nrows))
+    fig.suptitle(f'Permutation null distributions - PH SNR  (N={N_PERMS})', fontsize=10)
+    plt.subplots_adjust(hspace=0.52, wspace=0.35, top=0.93, bottom=0.07)
+    axes_flat = axes.flatten()
+
+    for ax, e in zip(axes_flat, entries):
+        null     = e['null']
+        null_max = np.max(null) if len(null) else 1
+        x_hi     = null_max * 1.15
+
+        ax.hist(null, bins=max(10, N_PERMS//10), color=e['col'], alpha=0.65,
+                edgecolor='white', linewidth=0.4)
+        ax.axvline(x=e['thresh95'], color='#C9B8E8', ls='--', lw=1.8,
+                   label=f"95th = {e['thresh95']:.1f}")
+
+        if e['snr'] <= x_hi:
+            ax.axvline(x=e['snr'], color='#cb4335', ls='-', lw=1.8,
+                       label=f"obs = {e['snr']:.1f}")
+        else:
+            ax.axvline(x=x_hi*0.98, color='#cb4335', ls='-', lw=1.8,
+                       label=f"obs = {e['snr']:.1f} \u2192")
+
+        ax.set_xlim(0, x_hi)
+        ax.set_xlabel('SNR (permuted)', fontsize=8)
+        ax.set_ylabel('count', fontsize=8)
+        ax.set_title(f"{e['Name']}\np = {e['pval_str']}", fontsize=9, pad=5)
+        ax.tick_params(labelsize=7)
+        ax.legend(fontsize=7, framealpha=0.5)
+        ax.grid(alpha=0.2, linewidth=0.5)
+
+    for ax in axes_flat[n_entries:]:
+        ax.set_visible(False)
+
+    plt.savefig(r'C:\Users\malai\Downloads\multigame_nulldist.png', dpi=180, bbox_inches='tight')
+    plt.show()
+    plt.close('all')
+    t_plot = time.time() - t0
+    print(f'Saved multigame_nulldist.png - took {t_plot:.2f}s')
+
+    t_total = time.time() - t_start
+    print('\nTIMING SUMMARY')
+    print(f'  Sims:  {t_sim:.2f}s')
+    print(f'  Plots: {t_plot:.2f}s')
+    print(f'  {"-"*30}')
+    print(f'  TOTAL: {t_total:.2f}s')
+    print('\nFiles saved to Downloads.')
