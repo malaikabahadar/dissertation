@@ -1,0 +1,61 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.colors as mc
+from matplotlib.collections import LineCollection
+import time, warnings
+warnings.filterwarnings('ignore')
+
+
+def standard_bound(d):
+    return np.sqrt(2 * (d + 1) / d)
+
+def grad_line(ax, x, y, c1, c2, lw=1.2, a=0.9):
+    pts  = np.array([x, y]).T.reshape(-1, 1, 2)
+    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+    r1,g1,b1 = mc.to_rgb(c1); r2,g2,b2 = mc.to_rgb(c2)
+    cols = [(r1+(r2-r1)*t, g1+(g2-g1)*t, b1+(b2-b1)*t, a)
+            for t in np.linspace(0, 1, len(x)-1)]
+    lc = LineCollection(segs, colors=cols, linewidth=lw)
+    ax.add_collection(lc); ax.autoscale_view(); return lc
+
+
+np.random.seed(42)
+t_start = time.time()
+
+print('plots')
+t0 = time.time()
+
+sqrt3  = np.sqrt(3)
+d_vals = np.linspace(2, 50, 300)
+s_vals = standard_bound(d_vals)
+
+fig, ax = plt.subplots(figsize=(8, 5))
+grad_line(ax, d_vals, s_vals, '#B8D4E8', '#C9B8E8', lw=2.0)
+ax.plot([], [], color='#B8D4E8', lw=2, label='standard bound $\\sqrt{2(d+1)/d}$')
+
+ax.axhline(sqrt3,      color='#cb4335', lw=1.8, ls='--',
+           label='$\\sqrt{3}$ bound')
+ax.axhline(np.sqrt(2), color='grey',    lw=1.2, ls=':',
+           label='$\\sqrt{2}$ limit ($d \\to \\infty$)')
+
+ax.set_xlabel('ambient dimension $d$', fontsize=9)
+ax.set_ylabel('lower bound on $\\mathrm{persVR}(H_1) / r_{\\mathrm{in}}$', fontsize=9)
+ax.set_title('Rips lower bound - standard vs $\\sqrt{3}$', fontsize=9, pad=6)
+ax.legend(fontsize=7, framealpha=0.5)
+ax.set_xlim(2, 50); ax.set_ylim(1.3, 2.0)
+ax.grid(alpha=0.25)
+ax.tick_params(labelsize=7)
+
+plt.tight_layout()
+plt.savefig(r'C:\Users\malai\Downloads\rips_lower_bound.png', dpi=180, bbox_inches='tight')
+plt.show()
+plt.close('all')
+t_plot = time.time() - t0
+print(f'Saved rips_lower_bound.png - took {t_plot:.2f}s')
+
+t_total = time.time() - t_start
+print('\nTIMING SUMMARY')
+print(f'  Plots: {t_plot:.2f}s')
+print(f'  {"-"*30}')
+print(f'  TOTAL: {t_total:.2f}s')
+print('\nFiles saved to Downloads.')
