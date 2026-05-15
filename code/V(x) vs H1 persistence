@@ -1,1 +1,152 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.colors as mc
+from matplotlib.collections import LineCollection
+from scipy.stats import pearsonr
+import ripser
+import time, warnings
+warnings.filterwarnings('ignore')
 
+#starting population based on data from the WRPSA (World Rock Paper Scissors Association) and Wang et al. (2014)
+sp = np.array([0.354, 0.296, 0.350])
+A  = np.array([[ 0,-1, 1],[ 1, 0,-1],[-1, 1, 0]])
+
+inits = [
+    np.array([0.334, 0.333, 0.333]),
+    np.array([0.354, 0.296, 0.350]),
+    np.array([0.45,  0.28,  0.27]),
+    np.array([0.55,  0.25,  0.20]),
+    np.array([0.60,  0.20,  0.20]),
+    np.array([0.27,  0.46,  0.27]),
+    np.array([0.22,  0.56,  0.22]),
+    np.array([0.20,  0.60,  0.20]),
+    np.array([0.27,  0.27,  0.46]),
+    np.array([0.22,  0.22,  0.56]),
+    np.array([0.20,  0.20,  0.60]),
+    np.array([0.50,  0.30,  0.20]),
+    np.array([0.20,  0.50,  0.30]),
+    np.array([0.30,  0.20,  0.50]),
+    np.array([0.48,  0.34,  0.18]),
+    np.array([0.18,  0.48,  0.34]),
+    np.array([0.34,  0.18,  0.48]),
+    np.array([0.55,  0.30,  0.15]),
+    np.array([0.15,  0.55,  0.30]),
+    np.array([0.30,  0.15,  0.55]),
+]
+
+np.random.seed(42)
+t_start = time.time()
+
+
+def step(x):
+    f  = A @ x
+    x2 = x + 0.01 * x * (f - x @ f)
+    x2 = np.clip(x2, 0.001, 1.0)
+    return x2 / x2.sum()
+
+def sim(init, steps=2000, seed=42):
+    np.random.seed(seed)
+    x = init.copy(); h = [x.copy()]
+    for _ in range(steps):
+        x = step(x); h.append(x.copy())
+    return np.array(h)
+
+def ph(traj, subsample=2000):
+    if len(traj) > subsample:
+        idx  = np.linspace(0, len(traj)-1, subsample, dtype=int)
+        traj = traj[idx]
+    res = ripser.ripser(traj, maxdim=1)
+    h1  = res['dgms'][1]; fin = h1[h1[:,1] != np.inf]
+    if len(fin):
+        ps = fin[:,1] - fin[:,0]
+        return float(max(ps))
+    return 0.0
+
+def V(traj):
+    return (traj[:,0] * traj[:,1] * traj[:,2]).mean()
+
+def grad_line(ax, x, y, c1, c2, lw=1.2, a=0.85):
+    pts  = np.array([x, y]).T.reshape(-1, 1, 2)
+    segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+    r1,g1,b1 = mc.to_rgb(c1); r2,g2,b2 = mc.to_rgb(c2)
+    cols = [(r1+(r2-r1)*t, g1+(g2-g1)*t, b1+(b2-b1)*t, a)
+            for t in np.linspace(0, 1, len(x)-1)]
+    lc = LineCollection(segs, colors=cols, linewidth=lw)
+    ax.add_collection(lc); ax.autoscale_view(); return lc
+
+print('simulations')
+t0 = time.time()
+v_vals = []; p_vals = []
+
+print(f"\n  {'R':>6} {'P':>6} {'S':>6} {'V(x)':>10} {'persistence':>12}")
+print(f"  {'-'*48}")
+
+for raw in inits:
+    init = raw / raw.sum()
+    traj = sim(init)
+    v    = V(traj)
+    p    = ph(traj)
+    v_vals.append(v); p_vals.append(p)
+    print(f"  {init[0]:>6.3f} {init[1]:>6.3f} {init[2]:>6.3f} "
+          f"{v:>10.6f} {p:>12.6f}")
+
+v_arr = np.array(v_vals)
+p_arr = np.array(p_vals)
+corr, pval = pearsonr(v_arr, p_arr)
+t_sim = time.time() - t0
+
+print(f'\n  r = {corr:.4f},  p = {pval:.2e},  n = {len(v_arr)}')
+print(f'  V(x) range: {v_arr.min():.5f} to {v_arr.max():.5f}')
+print(f'\nDone - took {t_sim:.2f}s')
+
+print('plots')
+t0 = time.time()
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+
+ax = axes[0]
+norm    = plt.Normalize(p_arr.min(), p_arr.max())
+c1p     = np.array(mc.to_rgb('#B8D4E8'))
+c2p     = np.array(mc.to_rgb('#F4A7B9'))
+colours = [mc.to_hex(tuple(c1p*(1-norm(p)) + c2p*norm(p))) for p in p_arr]
+for v, p, c in zip(v_arr, p_arr, colours):
+    ax.scatter(v, p, color=c, s=70, zorder=5,
+               edgecolors='black', linewidths=0.3)
+z     = np.polyfit(v_arr, p_arr, 1)
+x_fit = np.linspace(v_arr.min()*0.97, v_arr.max()*1.03, 200)
+ax.plot(x_fit, np.poly1d(z)(x_fit), color='#cb4335', lw=1.8, ls='--',
+        label=f'r = {corr:.4f},  p = {pval:.2e}', alpha=0.9)
+ax.set_xlabel('V(x)', fontsize=9)
+ax.set_ylabel('H\u2081 persistence', fontsize=9)
+ax.set_title(f'n = {len(v_arr)}', fontsize=9, pad=6)
+ax.legend(fontsize=8, framealpha=0.5)
+
+ax2 = axes[1]
+traj_check = sim(sp)
+V_series   = traj_check[:,0] * traj_check[:,1] * traj_check[:,2]
+V_mean     = V_series.mean()
+V_range    = V_series.max() - V_series.min()
+t_n        = np.arange(len(V_series))
+
+grad_line(ax2, t_n, V_series, '#B8D4E8', '#C9B8E8', lw=0.9, a=0.75)
+ax2.axhline(y=V_mean, color='#cb4335', ls='--', lw=1.2, alpha=0.7,
+            label=f'mean = {V_mean:.5f}')
+ax2.set_xlabel('timestep', fontsize=9)
+ax2.set_ylabel('V(x)', fontsize=9)
+ax2.set_title(f'conservation check  (range = {V_range:.1e})', fontsize=9, pad=6)
+ax2.legend(fontsize=8, framealpha=0.5)
+
+plt.tight_layout(rect=[0, 0, 1, 0.95])
+plt.savefig(r'C:\Users\malai\Downloads\vx.png', dpi=180, bbox_inches='tight')
+plt.show()
+plt.close('all')
+t_plot = time.time() - t0
+print(f'Saved vx.png - took {t_plot:.2f}s')
+
+t_total = time.time() - t_start
+print('\nTIMING SUMMARY')
+print(f'  Sims:  {t_sim:.2f}s')
+print(f'  Plots: {t_plot:.2f}s')
+print(f'  {"-"*30}')
+print(f'  TOTAL: {t_total:.2f}s')
+print('\nFiles saved to Downloads.')
